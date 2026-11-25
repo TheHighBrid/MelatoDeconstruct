@@ -1,0 +1,14 @@
+import test from 'node:test';import assert from 'node:assert/strict';
+import {productList,promptFor,qcReport} from '../public/core.js';
+import {gemini,operate,createServer,imagePart} from '../server.mjs';
+const p={name:'Wool coat',category:'outerwear',description:'Wool seams',color:'black',material:'wool',boundingRegionNote:'upper body',reconstructionNote:'unknown back'};
+const c={model:'gemini-nano-banana-2.1',ratio:'4:5',mode:'preserve-original',size:'M',country:'Italy'};
+const image={mimeType:'image/png',base64:'iVBORw0KGgo='};
+test('no fabricated detection',()=>{assert.deepEqual(productList([]),[]);assert.throws(()=>productList([{name:'fake',category:'bad'}]));});
+test('prompt respects aspect ratio and branding',()=>{const s=promptFor(p,c,'back-view');assert.match(s,/4:5/);assert.match(s,/do not add or remove logos/);assert.doesNotMatch(s,/User supplied size/);assert.doesNotMatch(s,/90 degree overhead/);});
+test('QC cannot silently pass malformed response',()=>assert.throws(()=>qcReport({passed:true,fidelityScore:95})));
+test('reject mismatched MIME',()=>assert.throws(()=>imagePart({...image,mimeType:'image/jpeg'})));
+test('provider timeout is bounded',async()=>{await assert.rejects(gemini('x',[],{}, {key:'test',timeout:15,fetcher:async(url,{signal})=>new Promise((_,reject)=>{const t=setTimeout(()=>reject(Error('late')),1000);signal.addEventListener('abort',()=>{clearTimeout(t);reject(signal.reason)})})}),/timed out/)});
+test('reject provider empty result',async()=>{await assert.rejects(gemini('x',[],{}, {key:'test',fetcher:async()=>({ok:true,json:async()=>({candidates:[]})})}),/no usable result/)});
+test('generation forwards source and references without injecting logo in preserve mode',async()=>{let body;const result=await operate('generate',{product:p,config:c,angle:'flat-lay',source:image,references:[image],logo:image},{key:'test',fetcher:async(url,o)=>{body=JSON.parse(o.body);return {ok:true,json:async()=>({candidates:[{content:{parts:[{inlineData:{mimeType:image.mimeType,data:image.base64}}]}}]})}}});assert.equal(body.contents[0].parts.filter(x=>x.inlineData).length,2);assert.equal(body.generationConfig.imageConfig.aspectRatio,'4:5');assert.deepEqual(result.image,image)});
+test('manual mode serves app but denies AI without consent/config',async()=>{const server=createServer({allow:false,key:'test'});await new Promise(r=>server.listen(0,'127.0.0.1',r));try{const base='http://127.0.0.1:'+server.address().port;assert.equal((await fetch(base)).status,200);assert.equal((await (await fetch(base+'/api/status')).json()).enabled,false);assert.equal((await fetch(base+'/api/detect',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'})).status,503)}finally{await new Promise(r=>server.close(r))}});
